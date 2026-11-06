@@ -6,6 +6,7 @@ should be run. No installs, downloads, AI commands, or shell command strings.
 """
 from __future__ import annotations
 
+import ast
 import ctypes
 from ctypes import wintypes
 import math
@@ -181,10 +182,16 @@ def _package_plan(root: Path, package: Path, source: str) -> list[list[str]]:
 
 def plan_run(workspace: Path, entry: str) -> list[list[str]]:
     root = Path(workspace).resolve(strict=True)
+    validate_patch_path(root, entry)
+    _preflight(root)
+    return _entry_plan(root, entry)
+
+
+def _entry_plan(root: Path, entry: str) -> list[list[str]]:
+    """Build an entry's argv without execution, filesystem writes or rescanning."""
     source_path = validate_patch_path(root, entry)
     if not source_path.is_file():
         raise ValueError('入口源文件不存在')
-    _preflight(root)
     source = source_path.read_text(encoding='utf-8-sig')
     ext = source_path.suffix.lower()
     build = _internal(root, 'build', uuid.uuid4().hex)
@@ -208,7 +215,7 @@ def plan_run(workspace: Path, entry: str) -> list[list[str]]:
                 break
             for config in ['pom.xml', 'build.gradle', 'build.gradle.kts']:
                 if (directory / config).is_file():
-                    return plan_run(root, str((directory / config).relative_to(root)))
+                    return _entry_plan(root, str((directory / config).relative_to(root)))
         package = re.search(r'^\s*package\s+([\w.]+)\s*;', source, re.M)
         classname = (package.group(1) + '.' if package else '') + source_path.stem
         source_root = source_path.parent
@@ -266,6 +273,349 @@ def plan_run(workspace: Path, entry: str) -> list[list[str]]:
     raise ValueError('不支持该入口；请选择 Java/Python/JavaScript/TypeScript/Go/sh 源文件')
 
 
+def _entry_tool(root: Path, path: Path) -> str | None:
+    names = {'package.json': 'node/npm', 'pom.xml': 'mvn',
+             'build.gradle': 'gradle', 'build.gradle.kts': 'gradle'}
+    if path.name in names:
+        return names[path.name]
+    if path.suffix.lower() == '.java':
+        for directory in [path.parent, *path.parents]:
+            if not directory.is_relative_to(root):
+                break
+            for config in ('pom.xml', 'build.gradle', 'build.gradle.kts'):
+                if (directory / config).is_file():
+                    return names[config]
+        return 'javac+java'
+    if path.suffix.lower() in {'.sh', '.bash'}:
+        first = path.read_text(encoding='utf-8-sig').splitlines()
+        line = first[0] if first else ''
+        return 'bash' if re.search(r'\bbash\b', line) else (
+            'sh' if line.startswith('#!') and re.search(r'\bsh\b', line)
+            else 'bash' if path.suffix.lower() == '.bash' else 'sh')
+    return {'.py': 'python', '.js': 'node', '.mjs': 'node', '.cjs': 'node',
+            '.ts': 'tsc+node', '.go': 'go'}.get(path.suffix.lower())
+
+
+def _launcher(root: Path, entry: str, commands: list[list[str]], tool: str) -> dict:
+    """Describe the existing plan; display templates never become execution input."""
+    path = validate_patch_path(root, entry)
+    result = {'mode': '', 'cwd': 'practice_root', 'shell': False,
+              'entry': path.relative_to(root).as_posix(), 'command': None}
+    # Build commands contain local tool installations, inline runner code and
+    # random internal paths. Their stable mode is truthful; an invented shell
+    # command would not be. None of these descriptions changes the actual argv.
+    if tool in {'mvn', 'gradle'}:
+        result['mode'] = 'maven_test' if tool == 'mvn' else 'gradle_test'
+        return result
+    if tool == 'javac+java':
+        result['mode'] = 'java_compile_run'
+        return result
+    if tool == 'tsc+node':
+        result['mode'] = ('typescript_project_compile_run' if len(commands) == 3
+                          and '--project' in commands[1] else 'typescript_compile_run')
+        return result
+    command = commands[0]
+
+    def relative(argument):
+        return Path(argument).resolve().relative_to(root).as_posix()
+
+    if tool == 'python':
+        result.update(mode='python_file', command=['python', *command[1:-1], relative(command[-1])],
+            automatic_test_discovery=False,
+            python_import_path={'first': 'entry_parent', 'adds_project_root': False,
+                                'inherits_pythonpath': False})
+    elif tool == 'node/npm' and '--prefix' in command and '--ignore-scripts' in command:
+        result.update(mode='npm_script', script=command[-1])
+    elif tool in {'node', 'node/npm'}:
+        result['mode'] = 'node_test' if '--test' in command[1:] else 'node_file' if len(command) > 1 else 'node_stdin'
+        result['command'] = ['node', *[argument if argument == '--test' else relative(argument)
+                                     for argument in command[1:]]]
+    elif tool == 'go':
+        result['mode'] = 'go_test_files' if command[1] == 'test' else 'go_run_files'
+        result['command'] = ['go', command[1], *[relative(argument) for argument in command[2:]]]
+    else:
+        result.update(mode='shell_file', command=[tool, relative(command[-1])])
+    return result
+
+
+def execution_capabilities(root: Path, entries: list[str]) -> dict:
+    """Read-only preflight/tool discovery; availability is never runtime proof."""
+    if not isinstance(entries, list) or len(entries) > 24 or any(not isinstance(entry, str) for entry in entries):
+        raise ValueError('运行能力查询需要至多24个入口路径。')
+    result = {'preflight': {'status': 'passed', 'reason': ''},
+              'entries': [], 'execution_verified': False}
+    try:
+        root = Path(root).resolve(strict=True)
+        if not root.is_dir():
+            raise ValueError('练习目录不存在')
+        _preflight(root)
+    except (OSError, ValueError) as error:
+        result['preflight'] = {'status': 'blocked', 'reason': str(error)}
+    for entry in dict.fromkeys(entries):
+        item = {'path': entry, 'supported': False, 'tool': None,
+                'tool_available': False, 'reason': '', 'launcher': None}
+        try:
+            path = validate_patch_path(root, entry)
+            if not path.is_file():
+                raise ValueError('入口源文件不存在')
+            item['tool'] = _entry_tool(root, path)
+            if item['tool'] is None:
+                raise ValueError('不支持该入口类型')
+            item['supported'] = True
+            commands = _entry_plan(root, entry)
+            item['launcher'] = _launcher(root, entry, commands, item['tool'])
+            item['tool_available'] = True
+        except (OSError, ValueError, RuntimeError) as error:
+            item['reason'] = str(error)
+        result['entries'].append(item)
+    return result
+
+
+def _python_write_risk(source: str, write_operation: re.Pattern) -> bool | None:
+    """Associate recognizable writes with their own receiver/arguments.
+
+    Bindings are scoped lexically and conservatively include every rebinding.
+    Unknown receivers are never assumed to be containers; only unambiguous
+    literal/container bindings may make append/remove/copy/replace benign.
+    Unparseable source retains the existing conservative textual fallback.
+    """
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError, RecursionError):
+        return None
+    nodes = list(ast.walk(tree))
+    parents = {child: node for node in nodes for child in ast.iter_child_nodes(node)}
+    scope_types = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda,
+                   ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
+    comprehension_types = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
+    outer = {}
+    for node in nodes:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            for value in [*node.args.defaults, *node.args.kw_defaults,
+                          *getattr(node, 'decorator_list', []), getattr(node, 'returns', None)]:
+                if value is not None:
+                    outer[value] = node
+        elif isinstance(node, ast.ClassDef):
+            for value in [*node.bases, *node.keywords, *node.decorator_list]:
+                outer[value] = node
+        elif isinstance(node, comprehension_types) and node.generators:
+            outer[node.generators[0].iter] = node
+    scope_cache = {}
+
+    def scope_of(node):
+        if node not in scope_cache:
+            parent = parents.get(node)
+            scope_cache[node] = (scope_of(outer[node]) if node in outer else parent
+                if isinstance(parent, scope_types) else scope_of(parent) if parent is not None else tree)
+        return scope_cache[node]
+
+    scoped_bindings, scoped_imports = {}, {}
+
+    def bind(scope, target, value):
+        if isinstance(target, ast.Name):
+            scoped_bindings.setdefault(scope, {}).setdefault(target.id, []).append(value)
+        elif isinstance(target, (ast.Tuple, ast.List)):
+            for child in target.elts:
+                bind(scope, child, None)
+
+    for node in nodes:
+        scope = scope_of(node)
+        bindings = scoped_bindings.setdefault(scope, {})
+        imports = scoped_imports.setdefault(scope, {})
+        if isinstance(node, (ast.Assign, ast.AnnAssign, ast.NamedExpr)):
+            if isinstance(node, ast.NamedExpr):
+                while isinstance(scope, comprehension_types):
+                    scope = scope_of(scope)
+            for target in node.targets if isinstance(node, ast.Assign) else [node.target]:
+                bind(scope, target, node.value)
+        elif isinstance(node, (ast.AugAssign, ast.For, ast.AsyncFor, ast.comprehension)):
+            bind(scope, node.target, None)
+        elif isinstance(node, ast.withitem) and node.optional_vars:
+            bind(scope, node.optional_vars, node.context_expr)
+        elif isinstance(node, ast.arg):
+            bindings.setdefault(node.arg, []).append(None)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            bindings.setdefault(node.name, []).append(None)
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            bindings.setdefault(node.name, []).append(None)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                name = alias.asname or alias.name.split('.')[0]
+                imports[name] = alias.name
+                bindings.setdefault(name, []).append(None)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            for alias in node.names:
+                name = alias.asname or alias.name
+                imports[name] = node.module + '.' + alias.name
+                bindings.setdefault(name, []).append(None)
+    # Global/nonlocal mutation prevents a binding from proving a safe type.
+    for node in nodes:
+        if isinstance(node, (ast.Global, ast.Nonlocal)):
+            for name in node.names:
+                for bindings in scoped_bindings.values():
+                    if name in bindings:
+                        bindings[name].append(None)
+
+    def lookup(node, name):
+        scope = scope_of(node)
+        while True:
+            if name in scoped_bindings.get(scope, {}) or scope is tree:
+                return scope, scoped_bindings.get(scope, {}).get(name, [])
+            scope = scope_of(scope)
+            # A method does not close over its class namespace.
+            while isinstance(scope, ast.ClassDef):
+                scope = scope_of(scope)
+
+    def qualified(node):
+        if isinstance(node, ast.Name):
+            scope, _ = lookup(node, node.id)
+            return scoped_imports.get(scope, {}).get(node.id, node.id)
+        if isinstance(node, ast.Attribute):
+            return qualified(node.value) + '.' + node.attr
+        return ''
+
+    def kind(node, seen=frozenset()):
+        if isinstance(node, (ast.List, ast.ListComp)):
+            return 'list'
+        if isinstance(node, (ast.Dict, ast.DictComp)):
+            return 'dict'
+        if isinstance(node, (ast.Set, ast.SetComp)):
+            return 'set'
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return 'str'
+        if isinstance(node, ast.Name) and len(seen) < 8:
+            scope, values = lookup(node, node.id)
+            key = (scope, node.id)
+            if key not in seen:
+                types = {kind(value, seen | {key}) for value in values}
+                return types.pop() if len(types) == 1 else None
+        if isinstance(node, ast.Call):
+            if (isinstance(node.func, ast.Name) and node.func.id in {'list', 'dict', 'set', 'str'}
+                    and not lookup(node.func, node.func.id)[1]):
+                return node.func.id
+            if isinstance(node.func, ast.Attribute):
+                receiver = kind(node.func.value, seen)
+                if receiver in {'list', 'dict', 'set'} and node.func.attr == 'copy':
+                    return receiver
+        return None
+
+    def external(node, seen=frozenset()):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return bool(re.match(r'^(?:/|[a-z]:[\\/]|\\|\.\.[\\/])', node.value, re.I))
+        if isinstance(node, ast.Name):
+            scope, values = lookup(node, node.id)
+            key = (scope, node.id)
+            if key in seen:
+                # Other bindings of this name are already traversed. A cycle
+                # alone does not connect an unrelated route to this operation.
+                return False
+            if len(seen) >= 8:
+                # Do not let a long unresolved path alias bypass the check.
+                return True
+            return any(external(value, seen | {key}) for value in values if value is not None)
+        return isinstance(node, ast.AST) and any(external(child, seen) for child in ast.iter_child_nodes(node))
+
+    safe = {'list': {'append', 'remove', 'copy'}, 'dict': {'copy'},
+            'set': {'remove', 'copy'}, 'str': {'replace'}}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        name = qualified(node.func)
+        if name.startswith('subprocess.') or name == 'os.system':
+            return True
+        operation = node.func.attr if isinstance(node.func, ast.Attribute) else name.rsplit('.', 1)[-1]
+        if not write_operation.search(operation + '('):
+            continue
+        if isinstance(node.func, ast.Attribute) and node.func.attr in safe.get(kind(node.func.value), set()):
+            continue
+        if external(node):
+            return True
+    return False
+
+
+def _javascript_dom_operations(source: str, external_literal: re.Pattern) -> str:
+    """Exclude narrow DOM operations from the legacy file-write name scan.
+
+    Only fixed class tokens or appending a visibly constructed DOM node qualify.
+    Unknown arguments, external-path bindings and dynamic method replacement
+    retain the conservative scan. This is not a JavaScript semantic resolver.
+    """
+    from .languages import _mask
+    masked = _mask(source)
+    if re.search(r'\b(?:Proxy|Reflect)\b|\bObject\s*\.\s*(?:assign|definePropert\w*)\s*\(|'
+                 r'\.\s*(?:classList|remove|appendChild)\s*=(?!=)', masked):
+        return source
+
+    def end_expression(start):
+        depth = 0
+        for offset in range(start, len(masked)):
+            char = masked[offset]
+            if char in '([{':
+                depth += 1
+            elif char in ')]}':
+                if depth == 0:
+                    return offset
+                depth -= 1
+            elif depth == 0 and char in ';\r\n':
+                return offset
+        return len(masked)
+
+    bindings = {}
+    for match in re.finditer(r'(?<![\w.$])([A-Za-z_$][\w$]*)\s*=(?!=|>)', masked):
+        finish = end_expression(match.end())
+        bindings.setdefault(match[1], []).append(source[match.end():finish].strip())
+
+    def external(expression, seen=frozenset()):
+        if external_literal.search(expression):
+            return True
+        # Property names and object keys are not references to same-named
+        # variables elsewhere in the file (e.g. els.root versus const root).
+        for name in re.findall(r'(?<![\w.$])([A-Za-z_$][\w$]*)(?![\w$]|\s*:)', _mask(expression)):
+            if name in seen:
+                continue
+            if len(seen) >= 8:
+                return True
+            if any(external(value, seen | {name}) for value in bindings.get(name, [])):
+                return True
+        return False
+
+    def created_node(expression):
+        if re.fullmatch(r'document\s*\.\s*createElement\s*\(\s*([\"\'])[\w-]+\1\s*\)', expression):
+            return True
+        if re.fullmatch(r'[A-Za-z_$][\w$]*', expression):
+            values = bindings.get(expression, [])
+            return bool(values) and all(re.fullmatch(
+                r'document\s*\.\s*createElement\s*\(\s*([\"\'])[\w-]+\1\s*\)', value) for value in values)
+        return False
+
+    result = list(source)
+    calls = re.finditer(r'(?P<receiver>\b[A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)*)'
+                        r'\s*\.\s*(?P<method>remove|appendChild)\s*\(', masked)
+    for match in calls:
+        receiver = re.sub(r'\s+', '', match['receiver'])
+        if match['method'] == 'remove' and not receiver.endswith('.classList'):
+            continue
+        root_name = receiver.split('.')[0]
+        if len(bindings.get(root_name, [])) > 1:
+            continue
+        finish = end_expression(match.end())
+        if finish >= len(masked) or masked[finish] != ')':
+            continue
+        arguments = source[match.end():finish].strip()
+        if external(receiver) or external(arguments):
+            continue
+        if match['method'] == 'remove':
+            # Dynamic class names may hide a path argument; retain the old guard.
+            token = r'(?:"[\w-]+"|\'[\w-]+\')'
+            if not re.fullmatch(token + r'(?:\s*,\s*' + token + r')*', arguments):
+                continue
+        elif not created_node(arguments):
+            continue
+        begin, end = match.span('method')
+        result[begin:end] = ' ' * (end - begin)
+    return ''.join(result)
+
+
 def _preflight(root: Path) -> None:
     # Conservative recognizable patterns only. Dynamic/computed behavior cannot
     # be secured by a static scan; the UI must expose this local execution limit.
@@ -301,8 +651,21 @@ def _preflight(root: Path) -> None:
             if _is_link(path):
                 raise ValueError('源文件包含符号链接，拒绝自动运行')
             source = path.read_text(encoding='utf-8-sig')
-            if (forbidden.search(source) or absolute_write.search(source)
-                    or (write_operation.search(source) and external_literal.search(source))):
+            write_risk = _python_write_risk(source, write_operation) if path.suffix.lower() == '.py' else None
+            if write_risk is None:
+                javascript = path.suffix.lower() in {'.js', '.mjs', '.cjs', '.ts'}
+                write_source = _javascript_dom_operations(source, external_literal) if javascript else source
+                absolute_risk = bool(absolute_write.search(source))
+                if javascript:
+                    from .languages import _mask
+                    masked = _mask(source)
+                    # HTML text such as <span>/path is not shell redirection.
+                    # A real fs call starts in code, even when its path is quoted.
+                    absolute_risk = any(not masked[match.start()].isspace()
+                                        for match in absolute_write.finditer(source))
+                write_risk = bool(absolute_risk
+                    or (write_operation.search(write_source) and external_literal.search(source)))
+            if forbidden.search(source) or write_risk:
                 raise ValueError(f'检测到潜在危险本地操作：{path.relative_to(root)}。自动运行已阻止；静态预检并非完整安全沙箱。')
 
 

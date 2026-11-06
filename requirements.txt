@@ -4,3 +4,4 @@ httpx==0.28.1
 pydantic==2.11.9
 keyring==25.7.0
 pytest==8.4.2
+pypdf==6.13.0

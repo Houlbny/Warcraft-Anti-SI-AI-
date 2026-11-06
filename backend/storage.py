@@ -43,21 +43,18 @@ class Store:
             rows = db.execute('SELECT value FROM records WHERE namespace=? ORDER BY rowid DESC', (namespace,)).fetchall()
         return [json.loads(row[0]) for row in rows]
 
-    def put_many(self, records):
+    def items(self, namespace, prefix=''):
+        with self.lock, self.connect() as db:
+            rows = db.execute('SELECT key,value FROM records WHERE namespace=? AND substr(key,1,?)=? ORDER BY rowid DESC',
+                              (namespace, len(prefix), prefix)).fetchall()
+        return {key: json.loads(value) for key, value in rows}
+
+    def put_many(self, records, *, delete_records=()):
         """Publish related records in one transaction, without partial chapters."""
         with self.lock, self.connect() as db:
             db.executemany('INSERT OR REPLACE INTO records VALUES (?,?,?)', [(namespace, key, json.dumps(value, ensure_ascii=False)) for namespace, key, value in records])
+            db.executemany('DELETE FROM records WHERE namespace=? AND key=?', delete_records)
 
     def delete_record(self, namespace, key):
         with self.lock, self.connect() as db:
             db.execute('DELETE FROM records WHERE namespace=? AND key=?', (namespace, key))
-
-    def delete_project_records(self, project_id):
-        """Remove only known archive records; shared settings and credentials stay."""
-        namespaces = ('projects', 'quests', 'campaigns', 'campaign_drafts', 'generation_diagnostics',
-                      'runs', 'repair_journal', 'repair_reports')
-        prefix = project_id + ':'
-        with self.lock, self.connect() as db:
-            db.executemany('DELETE FROM records WHERE namespace=? AND key=?', [(n, project_id) for n in namespaces])
-            db.executemany('DELETE FROM records WHERE namespace=? AND substr(key,1,?)=?',
-                           [(n, len(prefix), prefix) for n in ('evaluations', 'quest_archives')])

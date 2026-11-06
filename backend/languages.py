@@ -150,24 +150,3 @@ def demo_path(language: str) -> Path:
     if language not in LANGUAGES:
         raise ValueError("不支持的演示语言")
     return ROOT / "examples" / language
-
-
-def demo_quests(language: str) -> list[dict]:
-    folder = demo_path(language)
-    filename = {"python": "main.py", "java": "Main.java", "javascript": "main.js", "typescript": "main.ts", "go": "main.go", "shell": "main.sh"}[language]
-    source = (folder / filename).read_text(encoding="utf-8")
-    marker = next(i for i, line in enumerate(source.splitlines(), 1) if "BUG" in line)
-    function_line = next(i for i, line in enumerate(source.splitlines(), 1) if "remaining" in line and "BUG" not in line)
-    definitions = [
-        ("explore", "追踪库存入口", "找到计算剩余库存的函数。", "填写函数名。", function_line, "remaining", "remaining=12", ["从输出语句向上追踪调用。", "函数名称表示剩余数量：remaining。"]),
-        ("predict", "先预测再运行", "初始库存 10，订单数量 2。当前代码含有一处运算符错误。", "输入当前程序完整标准输出。", marker, "remaining=12", "remaining=12", ["先按源码的加号计算，而不是按业务含义计算。", "10 + 2 = 12；输出带 remaining= 前缀。"]),
-        ("repair", "修复扣减库存", "销售订单应从库存扣除。修改 remaining 中 BUG 标记的表达式。", "保持输入为 10 和 2，让程序输出 remaining=8。", marker, None, "remaining=8", ["只需修改一个运算符。", "将加法改为减法，再实际运行确认。"]),
-        ("feature", "避免负库存", "在扣减修复后增加边界处理：订单数量大于库存时返回 0。将示例订单从 2 改为 12。", "保留通用扣减函数，输出 remaining=0。", function_line, None, "remaining=0", ["先算 stock - ordered，再将负值限制为 0。", "可用条件分支或该语言的最大值函数；示例调用的第二个参数要改为 12。"]),
-    ]
-    quests = []
-    for kind, title, brief, objective, line, answer, output, hints in definitions:
-        quest = {"id": f"{language}-{kind}", "type": kind, "title": title, "brief": brief, "objective": objective, "source_file": filename, "line": line, "expected_output": output, "status": "available", "hints_used": 0, "origin": "demo", "verification": "探索/预测使用明确答案；修复/扩展必须实际运行，exit 0 且标准输出匹配目标。", "hints": hints}
-        if answer is not None:
-            quest["answer"] = answer
-        quests.append(quest)
-    return quests

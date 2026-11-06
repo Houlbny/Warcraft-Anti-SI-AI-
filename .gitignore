@@ -21,6 +21,7 @@ htmlcov/
 .idea/
 .vscode/
 .superpowers/
+.playwright-cli/
 .agents/
 .codex/
 

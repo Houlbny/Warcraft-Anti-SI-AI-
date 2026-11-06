@@ -45,20 +45,19 @@ class RuntimeApiTests(unittest.TestCase):
         self.assertEqual(self.stopped, [True])
 
     def test_busy_generation_blocks_restart_and_shutdown_blocks_new_work(self):
-        from backend.campaigns import Campaigns
+        import base64
+        import time
+        from backend.adventures import Adventures
         self.register()
-        source = Path(self.temp.name) / 'source'
-        source.mkdir()
-        (source / 'main.py').write_text('print(1)\n', encoding='utf-8')
-        project = self.client.post('/api/projects/import', json={'path': str(source)}).json()
-        base = '/api/projects/' + project['id']
+        source = self.client.post('/api/imports', json={'files': [{'path': 'guide.md', 'data_base64': base64.b64encode(b'Guide for synthetic runtime test.').decode()}]}).json()
+        base = '/api/imports/' + source['id']
         started, finish = Event(), Event()
         def delayed(*args, **kwargs):
             started.set()
             finish.wait(10)
             return {'status': 'failed'}
-        with patch.object(Campaigns, 'generate', delayed), ThreadPoolExecutor(max_workers=1) as pool:
-            request = pool.submit(self.client.post, base + '/campaign', json={'role': 'mage'})
+        with patch.object(Adventures, 'analyze', delayed), ThreadPoolExecutor(max_workers=1) as pool:
+            request = pool.submit(self.client.post, base + '/analyze', json={})
             try:
                 self.assertTrue(started.wait(5))
                 self.assertEqual(self.client.post('/api/runtime/shutdown', headers=self.headers, json={}).status_code, 409)
@@ -66,5 +65,10 @@ class RuntimeApiTests(unittest.TestCase):
             finally:
                 finish.set()
             request.result()
-            self.assertEqual(self.client.post('/api/runtime/shutdown', headers=self.headers, json={}).status_code, 202)
-            self.assertEqual(self.client.post(base + '/campaign', json={'role': 'mage'}).status_code, 503)
+            for _ in range(100):
+                response = self.client.post('/api/runtime/shutdown', headers=self.headers, json={})
+                if response.status_code != 409:
+                    break
+                time.sleep(.01)
+            self.assertEqual(response.status_code, 202)
+            self.assertEqual(self.client.post(base + '/analyze', json={}).status_code, 503)

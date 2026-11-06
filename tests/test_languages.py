@@ -35,21 +35,18 @@ class LanguageTests(unittest.TestCase):
                 self.assertGreaterEqual(symbol['end_line'],symbol['line'])
                 self.assertLessEqual(symbol['end_line'],len(source.splitlines()))
 
-    def test_entries_and_demo_contract(self):
+    def test_entries_and_demo_sources(self):
         self.assertEqual(self.mod.suggest_entry([{'path':'util.py','symbols':[]},{'path':'main.py','symbols':[]}]), 'main.py')
         self.assertIsNone(self.mod.suggest_entry([{'path':'package.json','symbols':[]}]))
         for lang in ('java','python','javascript','typescript','go','shell'):
             folder = self.mod.demo_path(lang)
             self.assertTrue(folder.is_dir())
-            quests = self.mod.demo_quests(lang)
-            self.assertEqual({q['type'] for q in quests}, {'explore','predict','repair','feature'})
-            self.assertEqual(len({q['id'] for q in quests}),len(quests))
-            for quest in quests:
-                source = (folder / quest['source_file']).read_text(encoding='utf-8')
-                self.assertLessEqual(quest['line'],len(source.splitlines()))
-                self.assertTrue(quest['hints'])
-                self.assertTrue(quest['expected_output'])
-                self.assertEqual(quest['origin'],'demo')
+            sources = [self.mod.analyze_file(path.name, path.read_text(encoding='utf-8'))
+                       for path in folder.iterdir() if path.is_file()]
+            entry = self.mod.suggest_entry(sources, lang)
+            self.assertIsNotNone(entry, lang)
+            self.assertEqual(self.mod.detect_language(entry), lang)
+            self.assertTrue((folder / entry).read_text(encoding='utf-8').strip())
         with self.assertRaises(ValueError):
             self.mod.demo_path('../outside')
 

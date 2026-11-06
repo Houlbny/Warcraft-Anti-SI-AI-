@@ -1,4 +1,4 @@
-export type CharacterRole = 'mage' | 'paladin' | 'druid';
+export type CharacterRole = 'mage' | 'paladin' | 'druid' | 'shaman' | 'priest';
 type Block = {x:number;y:number;w:number;h:number;color:string};
 /** Shared pixel geometry keeps the portrait and world sprite identical. */
 export function characterBlocks(role:CharacterRole):Block[] {
@@ -21,7 +21,7 @@ export function characterBlocks(role:CharacterRole):Block[] {
     r(24,19,19,4,'#f4db9b');r(31,5,5,10,'#bc7375');r(28,8,11,5,'#dd9e8e');r(45,46,6,7,'#d8b89b');
     r(52,28,3,34,'#c5c9c4');r(50,22,7,25,'#e9e7d5');r(48,46,11,3,'#d5ae62');r(52,50,3,12,'#8b6244');
     r(8,39,17,20,'#634d37');r(11,35,16,22,'#dfb46a');r(14,39,10,19,'#42636c');r(16,55,6,6,'#c5a460');r(17,39,3,15,'#f1d78c');r(13,44,11,3,'#f1d78c');
-  } else {
+  } else if(role==='druid') {
     r(21,34,24,27,'#355c4d');r(17,38,9,19,'#547a59');r(42,37,8,20,'#50764f');r(26,35,10,25,'#789967');
     r(23,53,21,8,'#648951');r(22,48,24,4,'#af9d63');r(32,47,5,6,'#dfcc8a');r(25,20,18,18,'#465640');
     r(28,26,12,11,'#dcbb99');r(28,26,12,4,'#9a8667');r(29,31,3,2,'#293b31');r(37,31,3,2,'#293b31');
@@ -29,13 +29,38 @@ export function characterBlocks(role:CharacterRole):Block[] {
     r(43,10,4,13,'#b9a478');r(47,7,4,10,'#c8b589');r(49,8,7,3,'#c8b589');r(39,14,8,3,'#c8b589');
     r(25,39,4,6,'#b1c184');r(29,43,4,5,'#b1c184');r(45,47,7,6,'#dcbb99');r(52,28,3,36,'#99835b');
     r(49,23,7,8,'#93ad69');r(54,17,7,9,'#abc27f');r(49,15,6,8,'#709c69');r(52,21,3,10,'#d7d8a0');
+  } else if(role==='shaman') {
+    // Broad shoulders, a storm mantle and carved totem distinguish the engineer.
+    r(21,31,24,30,'#255e6d');r(16,32,12,12,'#4b8c95');r(40,32,12,12,'#5c9ca0');
+    r(26,36,15,23,'#386b79');r(30,36,6,24,'#a3c7be');r(20,50,26,5,'#ae8052');
+    r(28,49,10,7,'#e0b975');r(31,50,4,5,'#71d4d3');r(17,43,8,12,'#466c70');
+    r(25,19,19,17,'#344954');r(28,24,13,12,'#b5aa8c');r(28,27,13,3,'#635f57');
+    r(29,30,3,2,'#172e38');r(38,30,3,2,'#172e38');r(23,18,23,6,'#62949b');
+    r(26,12,17,8,'#326574');r(30,6,4,9,'#8fc7c4');r(36,9,4,8,'#c4ddd1');
+    r(18,21,6,8,'#a5c3b7');r(15,15,5,11,'#598d95');r(45,21,6,8,'#a5c3b7');
+    r(49,15,5,11,'#598d95');r(44,46,7,7,'#b5aa8c');r(52,21,4,44,'#876c4f');
+    r(48,12,12,14,'#5f8581');r(50,15,8,8,'#274d58');r(52,16,4,5,'#a6f1e4');
+    r(48,9,4,6,'#ba9b65');r(56,9,4,6,'#ba9b65');r(48,28,12,4,'#81b6b3');
+    r(11,44,7,15,'#896c4b');r(9,44,11,5,'#d3aa70');r(13,40,4,9,'#88b6ad');
+  } else {
+    // A pale cowl, aureole and open chronicle distinguish the historian.
+    r(23,33,21,29,'#8c819f');r(19,36,8,22,'#b4a6bd');r(40,36,8,22,'#b4a6bd');
+    r(25,39,17,23,'#ddd3d1');r(30,38,6,24,'#c7ab74');r(21,58,25,5,'#b7a0b4');
+    r(23,19,23,20,'#80718e');r(27,23,15,15,'#d5b89f');r(27,23,15,5,'#b49a9d');
+    r(28,31,3,2,'#3e354a');r(38,31,3,2,'#3e354a');r(23,19,5,21,'#c6b8cb');
+    r(41,19,5,21,'#c6b8cb');r(27,15,15,6,'#e4d8d8');r(31,11,7,6,'#cbb985');
+    r(22,5,24,3,'#e6cf92');r(18,8,5,3,'#b7a174');r(45,8,5,3,'#b7a174');
+    r(20,11,3,3,'#dbc897');r(46,11,3,3,'#dbc897');r(17,44,8,7,'#d5b89f');
+    r(43,44,8,7,'#d5b89f');r(10,42,17,13,'#715774');r(12,44,13,8,'#dfd3b0');
+    r(13,46,10,1,'#8b7d74');r(13,49,8,1,'#8b7d74');r(27,43,3,13,'#bc9e65');
+    r(51,29,3,35,'#b59c73');r(47,23,11,7,'#d9c391');r(51,18,3,15,'#eee0ad');
   }
   return blocks;
 }
 
 export default function Character({role,size=96}:{role:CharacterRole;size?:number}) {
   return <svg width={size} height={size} viewBox="0 0 64 72" role="img"
-    aria-label={{mage:'法师',paladin:'圣骑士',druid:'德鲁伊'}[role]} shapeRendering="crispEdges"
+    aria-label={{mage:'法师',paladin:'圣骑士',druid:'德鲁伊',shaman:'萨满祭司',priest:'牧师'}[role]} shapeRendering="crispEdges"
     style={{imageRendering:'pixelated',flexShrink:0}}>
     {characterBlocks(role).map((block,index)=><rect key={index} x={block.x} y={block.y} width={block.w} height={block.h} fill={block.color}/>)}
   </svg>;

@@ -3,7 +3,6 @@ import json
 
 import pytest
 
-from backend import campaigns
 
 
 def validation_module():
@@ -76,52 +75,3 @@ def test_error_never_serializes_response_or_custom_type_representation():
         module.text_field({'summary': secret * 100}, 'summary', maximum=400)
     assert secret not in str(caught.value)
     assert secret not in json.dumps(caught.value.to_dict())
-
-
-def sample_task():
-    return {
-        'type': 'explore', 'focus': 'language', 'title': '读取函数', 'brief': '阅读源码',
-        'objective': '说明返回值', 'source_file': 'main.py', 'line': 1,
-        'steps': [{'title': '阅读', 'instruction': '打开源码'}, {'title': '提交', 'instruction': '回答问题'}],
-        'hints': ['查看输入', '查看表达式', '查看返回值'], 'concepts': [], 'rubric': [],
-        'verification_mode': 'answer', 'verification': '答案匹配', 'answer': '结果',
-        'success_message': '已回答',
-    }
-
-
-@pytest.mark.parametrize('where,expected', [
-    ('title', 'quests[0].title'),
-    ('step', 'quests[0].steps[1].instruction'),
-    ('answer', 'quests[0].answer'),
-    ('expected_output', 'quests[0].expected_output'),
-])
-def test_campaign_validation_reports_fixed_task_and_step_paths(where, expected):
-    module = validation_module()
-    task = sample_task()
-    if where == 'step':
-        task['steps'][1]['instruction'] = None
-    elif where == 'expected_output':
-        task.update(type='repair', verification_mode='run', expected_output=None)
-    else:
-        task[where] = None
-    with pytest.raises(module.ContentValidationError) as caught:
-        campaigns.Campaigns(None, None, None, None).validate(
-            [task], 'mage', [{'path': 'main.py', 'line_count': 3, 'hash': 'synthetic'}], partial=True)
-    assert caught.value.details['field'] == expected
-
-
-def test_campaign_reexports_helper_and_preserves_expected_output_stripping():
-    assert campaigns.text_field is validation_module().text_field
-    task = sample_task()
-    task.update(type='repair', verification_mode='run', expected_output=' \nanswer=2\n ')
-    result = campaigns.Campaigns(None, None, None, None).validate(
-        [task], 'mage', [{'path': 'main.py', 'line_count': 3, 'hash': 'synthetic'}], partial=True)
-    assert result[0]['expected_output'] == 'answer=2'
-
-
-def test_checker_type_error_does_not_request_text_for_boolean_field():
-    from backend.campaign_generation import validate_check
-    with pytest.raises(validation_module().ContentValidationError) as caught:
-        validate_check({'consistent': 'true', 'issues': []})
-    assert caught.value.details['expected_type'] == 'bool'
-    assert '需要文本' not in str(caught.value)

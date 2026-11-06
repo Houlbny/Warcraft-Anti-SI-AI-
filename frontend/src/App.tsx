@@ -1,132 +1,129 @@
-import {useEffect,useRef,useState} from 'react';
-import {FolderOpen,BookOpen,Settings2,Map,ChevronRight,Lock,Check,Flame,ScrollText,ArrowRight,RefreshCw,X,ShieldCheck} from 'lucide-react';
-import {api,roles,type Campaign,type Project,type Quest,type Role,type Settings} from './api';
-import World from './World';
+import {useCallback,useEffect,useRef,useState} from 'react';
+import {api,type Role,type RoleInfo,type Character as Hero,type ImportRecord,type Adventure,type Task,type Settings,type Source,type Evaluation,type Run,type Reflection} from './api';
+import IntroCinematic from './IntroCinematic';
+import RealmBackdrop from './RealmBackdrop';
 import Character from './Character';
-import Workbench from './Workbench';
-import GenerationScene from './GenerationScene';
-import StoryPanel from './StoryPanel';
-import {prologue,questStory,questCompletionStory,roleStories,storyBrand} from './story';
-import './story.css';
-import {Modal,ProjectsPanel,SettingsPanel,LibraryPanel} from './Panels';
-type Panel='projects'|'settings'|'library'|'story'|null;
-export default function App(){
- const[projects,setProjects]=useState<Project[]>([]),[pid,setPid]=useState(localStorage.getItem('codewarden.project')||''),[campaign,setCampaign]=useState<Campaign|null>(null),[selectedQid,setSelectedQid]=useState(''),[selectedRole,setSelectedRole]=useState<Role|null>(null),[panel,setPanel]=useState<Panel>(null),[workspace,setWorkspace]=useState(false),[routeOpen,setRouteOpen]=useState(false),[loading,setLoading]=useState(true),[busy,setBusy]=useState(false),[recovering,setRecovering]=useState(false),[now,setNow]=useState(Date.now()),[error,setError]=useState(''),[notice,setNotice]=useState(''),[returnToRole,setReturnToRole]=useState(false),[libraryQuery,setLibraryQuery]=useState(''),[result,setResult]=useState<{quest:Quest;feedback:string}|null>(null);
- const generationAttempt=useRef(0);
- const deletedProjectIds=useRef(new Set<string>());
- const projectListRequest=useRef(0);
- const pendingGeneration=useRef<{attempt:number;baselineStartedAt:string|null;observedActive:boolean}|null>(null);
- const project=projects.find(p=>p.id===pid),quests=campaign?.quests||[],quest=quests.find(q=>q.id===selectedQid)||null,profile=roles.find(r=>r.id===(campaign?.role||selectedRole));
- const ready=campaign?.status==='ready'||campaign?.status==='completed',needsSetup=!!project&&!!campaign&&!ready;
- async function refreshProjects(){const request=++projectListRequest.current;const ps=(await api<Project[]>('/projects')).filter(p=>!deletedProjectIds.current.has(p.id));if(request===projectListRequest.current)setProjects(ps);return ps}
- useEffect(()=>{refreshProjects().then(ps=>{const chosen=ps.find(p=>p.id===pid)||ps[0];if(chosen)setPid(chosen.id);else{setPid('');setLoading(false)}}).catch(e=>{setError(e.message);setLoading(false)})},[]);
- useEffect(()=>{if(!pid){setCampaign(null);return}let active=true;generationAttempt.current++;pendingGeneration.current=null;setRecovering(false);setBusy(false);setLoading(true);setCampaign(null);setSelectedRole(null);setSelectedQid('');setWorkspace(false);setResult(null);setRouteOpen(false);localStorage.setItem('codewarden.project',pid);api<Campaign>(`/projects/${pid}/campaign`).then(c=>{if(!active||deletedProjectIds.current.has(pid))return;setCampaign(c);setSelectedRole(c.role);setSelectedQid(c.current_quest_id||c.quests[c.quests.length-1]?.id||'')}).catch(e=>{if(active&&!deletedProjectIds.current.has(pid))setError(e.message)}).finally(()=>{if(active&&!deletedProjectIds.current.has(pid))setLoading(false)});return()=>{active=false}},[pid]);
- function observeGeneration(c:Campaign){
-  setCampaign(c);setRecovering(false);
-  if(c.status==='ready'||c.status==='completed'){
-   generationAttempt.current++;setBusy(false);setError('');setNotice('');
-   setSelectedQid(c.current_quest_id||c.quests[0]?.id||'');setResult(null);
-  }else if(c.status==='failed'){
-   generationAttempt.current++;setBusy(false);setError(c.error||'章节生成失败，请检查设置后重试。');
-  }
- }
- useEffect(()=>{
-  if(!pid||(campaign?.status!=='generating'&&!recovering))return;
-  let active=true,inFlight=false;
-  const timer=setInterval(()=>{if(inFlight)return;inFlight=true;void api<Campaign>(`/projects/${pid}/campaign`).then(c=>{
-   if(!active||deletedProjectIds.current.has(pid))return;
-   // A POST may still be reaching the handler; an old unprepared state is not its outcome.
-   if(c.status==='unprepared'&&busy)return;
-   const pending=pendingGeneration.current;
-   // Before the POST reaches the handler, polling can still see the previous failed attempt.
-   if(pending&&pending.attempt===generationAttempt.current){
-    if(c.status==='failed'&&!pending.observedActive&&(!c.started_at||c.started_at===pending.baselineStartedAt))return;
-    if(c.status==='generating')pending.observedActive=true;
-   }
-   observeGeneration(c);
-  }).catch(()=>{if(active&&!deletedProjectIds.current.has(pid))setNotice('暂时无法查询生成状态，正在继续确认结果。请勿重复提交生成。')}).finally(()=>{inFlight=false})},3000);
-  return()=>{active=false;clearInterval(timer)};
- },[campaign?.status,recovering,busy,pid]);
- useEffect(()=>{
-  if(campaign?.status!=='generating'&&!recovering&&!busy)return;
-  setNow(Date.now());const timer=setInterval(()=>setNow(Date.now()),1000);
-  return()=>clearInterval(timer);
- },[campaign?.status,recovering,busy]);
- async function generate(){
-  if(!selectedRole||!project||busy||recovering||campaign?.status==='generating')return;
-  const attempt=++generationAttempt.current;let posted=false;
-  setError('');setNotice('');setBusy(true);
-  try{
-   const s=await api<Settings>('/settings');
-   if(attempt!==generationAttempt.current)return;
-   let localEndpoint=false;try{localEndpoint=['localhost','127.0.0.1','::1','[::1]'].includes(new URL(s.base_url).hostname.toLowerCase())}catch{}
-   if(!s.base_url||!s.model||(!s.key_set&&!localEndpoint)){setReturnToRole(true);setPanel('settings');return}
-   setCampaign(c=>c?{...c,status:'generating',role:selectedRole,generation:c.role===selectedRole?c.generation:undefined,error:undefined,started_at:undefined,phase:undefined,source_count:undefined,input_bytes:undefined,wait_timeout_seconds:undefined}:c);
-   posted=true;pendingGeneration.current={attempt,baselineStartedAt:campaign?.started_at||null,observedActive:false};
-   const c=await api<Campaign>(`/projects/${pid}/campaign`,'POST',{role:selectedRole});
-   if(attempt!==generationAttempt.current)return;
-   pendingGeneration.current=null;observeGeneration(c);await refreshProjects();
-  }catch(e){
-   if(attempt!==generationAttempt.current)return;
-   const message=(e as Error).message;
-   if(!posted){setError(message);return}
-   pendingGeneration.current=null;
-   // Losing the POST response does not establish that the paid model request failed.
-   try{
-    const c=await api<Campaign>(`/projects/${pid}/campaign`);
-    if(attempt!==generationAttempt.current)return;
-    observeGeneration(c);
-    if(c.status==='generating')setNotice('连接中断，但后台仍在生成。正在查询结果，请勿重复提交。');
-    else if(c.status==='failed')setError(c.error||message);
-    else if(c.status==='unprepared')setError('服务端尚未开始生成，请检查连接后再提交。');
-   }catch{
-    if(attempt!==generationAttempt.current)return;
-    setRecovering(true);setNotice('连接中断，生成结果尚未确认。正在查询后台状态，请勿重复提交。');
-   }
-  }finally{if(pendingGeneration.current?.attempt===attempt)pendingGeneration.current=null;if(attempt===generationAttempt.current)setBusy(false)}
- }
+import MaterialPicker from './MaterialPicker';
+import MaterialAnalysis,{AnalysisProgressView,analysisReady,analysisStatus} from './MaterialAnalysis';
+import {storyBrand,roleStories} from './story';
+import {draftKey,clearSavedDraft} from './drafts';
+import {RequestGate,NavigationEpoch} from './requestGate';
 
- function deletedProject(id:string,message:string){
-  deletedProjectIds.current.add(id);projectListRequest.current++;
-  setProjects(ps=>ps.filter(p=>p.id!==id));setError('');setNotice(message);
-  if(pid!==id)return;
-  // Invalidate pending generation and campaign responses before React runs effect cleanup.
-  generationAttempt.current++;pendingGeneration.current=null;
-  setPid('');setCampaign(null);setSelectedQid('');setSelectedRole(null);
-  setWorkspace(false);setResult(null);setRouteOpen(false);setReturnToRole(false);
-  setBusy(false);setRecovering(false);setLoading(false);setPanel('projects');
-  try{localStorage.removeItem('codewarden.project')}catch{}
- }
- function selectProject(p:Project){if(deletedProjectIds.current.has(p.id))return;if(p.id===pid){setPanel(null);return}setPid(p.id);setPanel(null);setReturnToRole(false)}
- function selectQuest(index:number){const q=quests[index];if(!q||q.status==='locked'||busy)return;setSelectedQid(q.id);setResult(null);setRouteOpen(false)}
- async function passed(q:Quest,feedback:string){if(deletedProjectIds.current.has(pid))return;const c=await api<Campaign>(`/projects/${pid}/campaign`);if(deletedProjectIds.current.has(pid))return;setCampaign(c);await refreshProjects();if(deletedProjectIds.current.has(pid))return;setResult({quest:q,feedback});setWorkspace(false)}
- function nextQuest(){setResult(null);setWorkspace(false);if(campaign?.current_quest_id){setSelectedQid(campaign.current_quest_id);setRouteOpen(false)}else setRouteOpen(true)}
- function openLibrary(query=''){setLibraryQuery(query);setPanel('library')}
- const generating=!ready&&(busy||recovering||campaign?.status==='generating');
- const showGenerationScene=generating||(campaign?.status==='failed'&&!!campaign.generation);
- const canResume=campaign?.status==='failed'&&campaign.generation?.resumable&&selectedRole===campaign.role;
- const changedRole=campaign?.status==='failed'&&!!selectedRole&&!!campaign.role&&selectedRole!==campaign.role;
- const started=campaign?.started_at?Date.parse(campaign.started_at):NaN;
- const elapsed=Number.isFinite(started)?Math.max(0,Math.floor((now-started)/1000)):null;
- const storyRole=campaign?.role||selectedRole||'mage';
- const currentStory=quest?(quest.status==='completed'?questCompletionStory(quest,storyRole,campaign?.status==='completed'&&quest.order===(campaign?.total||quests.length)-1,campaign?.total||quests.length):questStory(quest,storyRole,campaign?.total||quests.length)):null;
- const completionStory=result?questCompletionStory(result.quest,storyRole,campaign?.status==='completed',campaign?.total||quests.length):null;
- return <main className={`game-shell role-${campaign?.role||selectedRole||'mage'}`}><div className="stage-backdrop"><World quests={ready?quests:[]} completed={campaign?.completed||0} onSelect={selectQuest} role={campaign?.role||selectedRole||undefined} currentQuestId={selectedQid}/></div><div className="stage-shade"/>
- <header className="game-hud"><button className="project-hud" onClick={()=>setPanel('projects')} disabled={generating}><span className="camp-seal"><Flame size={22}/></span><span><small>{storyBrand.title}<span className="hud-camp"> · {storyBrand.camp}</span></small><strong>{project?.name||'尚未载入项目'}</strong></span><ChevronRight size={17}/></button><div className="chapter-hud">{ready?<><span>{profile?.name} · {campaign?.title}</span><div className="hud-progress"><i style={{width:`${campaign?.total?(campaign.completed/campaign.total)*100:0}%`}}/></div><small>{campaign?.completed} / {campaign?.total} 关完成</small></>:<span>{loading?'正在读取档案…':project?'章节尚未准备':'导入项目后选择职业'}</span>}</div><nav className="hud-tools"><button aria-label="故事" title="故事" onClick={()=>setPanel('story')}><ScrollText size={19}/><span>故事</span></button><button aria-label="章节路线" title="章节路线" className={routeOpen?'selected':''} disabled={!ready} onClick={()=>setRouteOpen(!routeOpen)}><Map size={19}/><span>路线</span></button><button aria-label="练习档案" title="练习档案" onClick={()=>setPanel('projects')} disabled={generating}><FolderOpen size={19}/><span>档案</span></button><button aria-label="知识档案" title="知识档案" onClick={()=>openLibrary()}><BookOpen size={19}/><span>资料</span></button><button aria-label="模型设置" title="模型设置" onClick={()=>{setReturnToRole(needsSetup);setPanel('settings')}} disabled={generating}><Settings2 size={19}/><span>设置</span></button></nav></header>
- {(error||notice)&&<div className={error?'stage-toast error':'stage-toast'} role={error?'alert':'status'}><span>{error||notice}</span><button aria-label="关闭通知" onClick={()=>{setError('');setNotice('')}}><X size={17}/></button></div>}
- {ready&&!routeOpen&&quest&&<button className="current-quest-marker game-panel" onClick={()=>setRouteOpen(true)}><ScrollText size={18}/><span><small>当前查看 · 第 {(quest.order??0)+1} 关</small><strong>{quest.title}</strong></span><Map size={15}/></button>}
- {ready&&routeOpen&&<aside className="route-panel game-panel" aria-label="章节路线列表"><header><div><small>{profile?.name}路线</small><h2>{campaign?.title}</h2></div><button className="icon-button" aria-label="收起章节路线" onClick={()=>setRouteOpen(false)}><X size={17}/></button></header><p>{campaign?.summary}</p><ol>{quests.map((q,i)=><li key={q.id}><button disabled={q.status==='locked'} className={selectedQid===q.id?'route-quest current':'route-quest'} onClick={()=>selectQuest(i)}><span className={`route-number ${q.status}`}>{q.status==='completed'?<Check size={16}/>:q.status==='locked'?<Lock size={14}/>:i+1}</span><span><strong>{q.title}</strong><small>{q.status==='locked'?'完成上一关后解锁':q.status==='completed'?'已完成 · 可回顾':'可挑战'}</small></span>{selectedQid===q.id&&<ChevronRight size={15}/>}</button></li>)}</ol>{campaign?.coverage&&<p className="coverage-note">{campaign.coverage}</p>}</aside>}
- {ready&&quest&&!workspace&&<section className="quest-dialogue story-quest-dialogue game-panel" aria-label="当前关卡指引"><div className="dialogue-portrait"><Character role={campaign!.role||'mage'} size={90}/><span>{profile?.name}</span></div><div className="dialogue-content"><div className="dialogue-label"><span>第 {(quest.order??0)+1} / {campaign?.total} 关</span><span>{quest.status==='completed'?'已完成 · 回顾':quest.verification_mode==='explain'?'源码解释题':quest.verification_mode==='review'?'实际运行 + AI 差异评审':quest.verification_mode==='run'?'本机真实运行验收':'源码问答题'}</span><span className="ai-tag">AI 生成章节</span></div><h1>{quest.title}</h1><p>{quest.brief}</p><div className="dialogue-objective"><strong>目标</strong><span>{quest.objective}</span></div>{currentStory&&<aside className="quest-story" aria-label="本关战地手记"><small>{currentStory.eyebrow} · 游戏剧情</small><strong>{currentStory.speaker} · {currentStory.title}</strong><p>{currentStory.body}</p></aside>}</div><div className="dialogue-actions">{quest.status==='completed'&&campaign?.current_quest_id?<><button className="button primary" onClick={nextQuest}>进入当前关卡<ArrowRight size={18}/></button><button className="text-button" onClick={()=>setWorkspace(true)}>回看本关源码</button></>:<><button className="button primary" onClick={()=>setWorkspace(true)}>{quest.status==='completed'?'回看本关源码':quest.verification_mode==='answer'?'查看源码并作答':quest.verification_mode==='explain'?'查看源码并解释':'打开工作台开始修改'}<ChevronRight size={18}/></button><span>{quest.steps?.length||0} 个操作步骤 · 引用 {quest.source_file}:{quest.line}</span></>}</div></section>}
- {!project&&!loading&&!panel&&<section className="start-dialogue story-start game-panel" aria-label="灰烬营地序章"><span className="story-label">{storyBrand.camp} · 游戏剧情</span><h1>{prologue.title}</h1><p>{prologue.paragraphs[0]}</p><p className="story-start-task">导入项目或示例源码，选择法师、圣骑士或德鲁伊，再由 AI 预生成所选路线，按顺序完成关卡。</p><div className="story-start-actions"><button className="button primary" onClick={()=>setPanel('projects')}>导入项目<FolderOpen size={17}/></button><button className="text-button" onClick={()=>setPanel('story')}>查看序章</button></div></section>}
- {project&&!campaign&&!loading&&!panel&&<section className="start-dialogue game-panel"><h2>未能读取章节</h2><p>检查本地服务后重试，已有源码和草稿仍保留。</p><button className="button primary" onClick={()=>{setLoading(true);void api<Campaign>(`/projects/${pid}/campaign`).then(c=>{if(deletedProjectIds.current.has(pid))return;setCampaign(c);setSelectedRole(c.role);setSelectedQid(c.current_quest_id||c.quests[0]?.id||'')}).catch(e=>{if(!deletedProjectIds.current.has(pid))setError(e.message)}).finally(()=>{if(!deletedProjectIds.current.has(pid))setLoading(false)})}}><RefreshCw size={16}/>重新读取</button></section>}
- {loading&&<div className="stage-loading"><span className="spinner"/>正在读取练习档案…</div>}
- {ready&&!workspace&&!panel&&!result&&<div className="world-controls"><span>方向键 / WASD 移动</span><span>点击已解锁节点查看关卡</span></div>}
- {needsSetup&&!panel&&<Modal title={generating?'正在准备完整章节':showGenerationScene?'章节生成已暂停':'选择本次探索的职业'} onClose={()=>setPanel('projects')} wide locked={generating} className={showGenerationScene?"role-panel gen-active-panel":"role-panel"}><div className="setup-project"><FolderOpen size={17}/><strong>{project?.name}</strong><span>{project?.languages.join(' / ')}</span></div>{showGenerationScene?<>{!generating&&<section className="gen-failure-controls"><div className="generation-error" role="status"><h3>生成已停止 · 已保存 {campaign?.generation?.quests_completed||0} / {campaign?.generation?.quests_total||0} 关</h3><p>{campaign?.error||'未能完成本轮生成，草稿进度已保留。'}</p><button className="text-button" onClick={()=>{setReturnToRole(true);setPanel('settings')}}>检查模型设置<Settings2 size={15}/></button></div><div className="gen-resume-row"><label>本次生成职业<select aria-label="本次生成职业" value={selectedRole||''} onChange={e=>setSelectedRole(e.target.value as Role)}>{roles.map(r=><option key={r.id} value={r.id}>{r.name} · {r.focus}</option>)}</select></label><button className="button primary" disabled={!selectedRole} onClick={()=>void generate()}>{canResume?'继续未完成部分':changedRole?'生成新职业路线':'重新生成所选路线'}<ArrowRight size={18}/></button></div><p className="gen-resume-copy">{changedRole?'已更换职业，将创建新的路线草稿；不会把此前职业的已存关卡当作本次进度。':canResume?'继续时从尚未完成的阶段接上；已保存的兼容结果由服务端保留。整章检查完成后才能开始闯关。':'此草稿当前无法续接。请检查设置后明确重新生成，完整章节通过检查后开放。'}</p></section>}<GenerationScene campaign={campaign!} role={campaign?.role||selectedRole||'mage'} active={generating} recovering={recovering} elapsed={elapsed}/></>:<><p className="panel-intro">角色会改变章节内容和提示深度。每个练习档案保留一条路线，生成后从第一关顺序推进。</p><div className="role-options">{roles.map(r=><button key={r.id} aria-pressed={selectedRole===r.id} className={selectedRole===r.id?'role-choice selected':'role-choice'} onClick={()=>setSelectedRole(r.id)}><span className="role-portrait"><Character role={r.id} size={100}/></span><h2>{r.name}</h2><strong>{r.focus}</strong><p>{r.description}</p><div className="role-introduction"><small>{roleStories[r.id].mentor} · {roleStories[r.id].epithet}</small><p>{roleStories[r.id].introduction}</p></div><ul>{r.details.map(d=><li key={d}>{d}</li>)}</ul><span className="choice-check">{selectedRole===r.id?<><Check size={16}/>已选择</>:'选择此职业'}</span></button>)}</div>{campaign?.status==='failed'&&<div className="generation-error" role="status"><h3>章节尚未生成</h3><p>{campaign.error||'生成失败，请检查设置后重试。'}</p><button className="text-button" onClick={()=>{setReturnToRole(true);setPanel('settings')}}>检查模型设置<Settings2 size={15}/></button></div>}<div className="setup-footer"><p><ShieldCheck size={15}/>按所选职业生成约 6–10 关，生成后开始。失败可重试。</p><button className="button primary" disabled={!selectedRole} onClick={()=>void generate()}>{campaign?.status==='failed'?'重新生成所选路线':'生成所选完整路线'}<ArrowRight size={18}/></button></div></>}</Modal>}
- {project&&ready&&<Workbench open={workspace&&!panel&&!result} project={project} quest={quest} onClose={()=>setWorkspace(false)} onPassed={passed} onError={setError} onLibrary={openLibrary}/>}
- {result&&<Modal title={campaign?.status==='completed'?'章节完成':'本关通过'} onClose={()=>setResult(null)} className="result-panel"><div className="result-emblem"><Check size={37}/></div><span className="tag">第 {(result.quest.order??0)+1} 关 · 验收通过</span><h2>{result.quest.title}</h2><p>{result.feedback}</p>{result.quest.success_message&&result.quest.success_message!==result.feedback&&<p className="success-story">{result.quest.success_message}</p>}{completionStory&&<section className="result-story" aria-label="通关战地手记"><small>{completionStory.eyebrow} · 游戏剧情</small><h3>{completionStory.title}</h3><strong>{completionStory.speaker}</strong><p>{completionStory.body}</p></section>}<div className="result-progress"><span>{campaign?.completed} / {campaign?.total} 关完成</span><strong>{campaign?.status==='completed'?'本章任务均已通过':`下一关：${quests.find(q=>q.id===campaign?.current_quest_id)?.title||'已解锁'}`}</strong></div><button className="button primary" onClick={nextQuest}>{campaign?.current_quest_id?'下一关':'查看章节记录'}<ArrowRight size={18}/></button><button className="text-button" onClick={()=>{setResult(null);setWorkspace(true)}}>回看源码与运行结果</button>{campaign?.coverage&&<p className="subtle">{campaign.coverage}</p>}</Modal>}
- {panel==='story'&&<StoryPanel onClose={()=>setPanel(null)} onImport={!project?()=>setPanel('projects'):undefined}/> }
- {panel==='projects'&&<ProjectsPanel projects={projects} activeId={pid} onSelect={selectProject} onChanged={refreshProjects} onDeleted={deletedProject} onError={setError} onClose={()=>setPanel(null)}/>}
- {panel==='settings'&&<SettingsPanel onClose={()=>setPanel(null)} onError={setError} onNotice={setNotice} onReturn={returnToRole?()=>{setPanel(null);setReturnToRole(false)}:undefined}/>}
- {panel==='library'&&<LibraryPanel initialQuery={libraryQuery} onClose={()=>setPanel(null)} onError={setError}/>}
- </main>
+type Journal={entries:{task_id:string;title:string;answer?:string;feedback?:string;status:string;hints_used:number;updated_at:string;reflection?:Reflection}[]};
+const roleNames:Record<Role,string>={mage:'法师',paladin:'圣骑士',druid:'德鲁伊',shaman:'萨满祭司',priest:'牧师'};
+const confidenceNames:Record<Reflection['confidence'],string>={needs_review:'还需复习',understood:'已经理解',can_apply:'能尝试运用'};
+export function journalEntryLabel(entry:Pick<Journal['entries'][number],'status'|'answer'|'reflection'>){
+ if(!entry.answer&&entry.reflection)return '自评记录';
+ return entry.status==='passed'?'本次已通过':entry.status==='needs_work'?'继续练习':entry.status==='pending'?'等待评审':'学习记录';
+}
+const taskStatus:Record<string,string>={locked:'尚未开放',available:'可探索',practicing:'探索中',completed:'已完成',unprepared:'待准备',generating:'准备中',failed:'准备失败',ready:'已准备'};
+function encodeFile(file:File):Promise<{path:string;data_base64:string}>{return new Promise((resolve,reject)=>{const reader=new FileReader();reader.onerror=()=>reject(reader.error);reader.onload=()=>resolve({path:file.webkitRelativePath||file.name,data_base64:String(reader.result).split(',')[1]});reader.readAsDataURL(file)})}
+function Modal({title,onClose,children}:{title:string;onClose:()=>void;children:React.ReactNode}){const ref=useRef<HTMLElement>(null);const closeRef=useRef(onClose);closeRef.current=onClose;useEffect(()=>{const previous=document.activeElement as HTMLElement|null;const elements=()=>Array.from(ref.current?.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled):not([hidden]), textarea:not(:disabled), select:not(:disabled), [tabindex="0"]')||[]);elements()[0]?.focus();const key=(e:KeyboardEvent)=>{if(e.key==='Escape'){e.preventDefault();closeRef.current()}if(e.key==='Tab'){const all=elements();if(!all.length){e.preventDefault();return}const index=all.indexOf(document.activeElement as HTMLElement);if(e.shiftKey&&index<=0){e.preventDefault();all[all.length-1].focus()}else if(!e.shiftKey&&(index===-1||index===all.length-1)){e.preventDefault();all[0].focus()}}};window.addEventListener('keydown',key);return()=>{window.removeEventListener('keydown',key);previous?.focus()}},[]);return <div className="veil" onMouseDown={e=>{if(e.target===e.currentTarget)onClose()}}><section ref={ref} className="dialog" role="dialog" aria-modal="true" aria-label={title}><header className="dialog-head"><h2>{title}</h2><button onClick={onClose} aria-label="关闭">×</button></header>{children}</section></div>}
+
+export function LearningPath({teaching}:{teaching:NonNullable<Task['teaching']>}){
+ const [mode,setMode]=useState<'learn'|'recall'|null>(null);
+ return <section className="learning-path" aria-label="选择学习方式">
+  <div className="button-row">
+   <button className={mode==='learn'?'primary':''} aria-pressed={mode==='learn'} onClick={()=>setMode('learn')}>{mode==='recall'?'查看讲解':'先学习理解'}</button>
+   <button className={mode==='recall'?'primary':''} aria-pressed={mode==='recall'} onClick={()=>setMode('recall')}>先尝试回忆</button>
+  </div>
+  <p className="muted">{mode==='recall'?'先用自己的话回答，需要时再查看讲解或提示。':mode==='learn'?'阅读讲解后，用下面的问题整理自己的理解。':'第一次接触可以先读讲解；熟悉的内容可以先尝试回忆。'}</p>
+  {mode==='learn'&&teaching.map((section,index)=><article className="teaching" key={index}><h3>{section.title}</h3><p>{section.body}</p></article>)}
+ </section>
+}
+
+type ReflectionDraft=Pick<Reflection,'confidence'|'note'>;
+export function ReflectionEditor({adventureId,taskId,saved,onSaved}:{adventureId:string;taskId:string;saved?:Reflection;onSaved:()=>Promise<void>}){
+ const storageKey=`reflection-draft:${encodeURIComponent(adventureId)}:${encodeURIComponent(taskId)}`;
+ const [value,setValue]=useState<ReflectionDraft>(()=>{
+  try{const draft=JSON.parse(localStorage.getItem(storageKey)||'null');if(draft&&Object.hasOwn(confidenceNames,draft.confidence)&&typeof draft.note==='string')return{confidence:draft.confidence,note:draft.note.slice(0,2000)}}catch{}
+  return{confidence:saved?.confidence??'needs_review',note:saved?.note??''}
+ });
+ const [saving,setSaving]=useState(false);const [message,setMessage]=useState('');const [error,setError]=useState('');
+ const alive=useRef(true);
+ useEffect(()=>{alive.current=true;return()=>{alive.current=false}},[]);
+ const edit=(next:ReflectionDraft)=>{setValue(next);localStorage.setItem(storageKey,JSON.stringify(next));setMessage('有未保存的自评改动')};
+ const save=async()=>{
+  const snapshot=JSON.stringify(value);setSaving(true);setError('');
+  try{
+   await api<Reflection>(`/adventures/${adventureId}/tasks/${taskId}/reflection`,'PUT',value);
+   clearSavedDraft(localStorage,storageKey,snapshot);
+   if(!alive.current)return;
+   setMessage(localStorage.getItem(storageKey)?'这次自评已保存，新的改动尚未保存。':'自评已保存。');
+   await onSaved();
+  }catch(e){if(alive.current)setError(e instanceof Error?e.message:String(e))}
+  finally{if(alive.current)setSaving(false)}
+ };
+ return <section className="reflection" aria-label="我的自评">
+  <h3>我的自评（不影响通过结果）</h3>
+  <p className="muted">记录当前感受，便于安排下一次复习；自评不会代替任务评审。</p>
+  <label>目前的理解<select value={value.confidence} onChange={e=>edit({...value,confidence:e.target.value as Reflection['confidence']})}>
+   {Object.entries(confidenceNames).map(([id,label])=><option key={id} value={id}>{label}</option>)}
+  </select></label>
+  <label>我的笔记<textarea rows={3} maxLength={2000} value={value.note} onChange={e=>edit({...value,note:e.target.value})} placeholder="记下已理解的关系，或下次想复习的问题。"/></label>
+  <button disabled={saving} onClick={()=>void save()}>{saving?'正在保存自评…':'保存自评'}</button>
+  {message&&<p className="muted" role="status">{message}</p>}{error&&<p className="notice" role="alert">{error}</p>}
+ </section>
+}
+
+export default function App(){
+ const [intro,setIntro]=useState(!localStorage.getItem('adventure-intro-seen'));const [roles,setRoles]=useState<RoleInfo[]>([]);const [heroes,setHeroes]=useState<Hero[]>([]);const [imports,setImports]=useState<ImportRecord[]>([]);const [hero,setHero]=useState<Hero|null>(null);const [adventures,setAdventures]=useState<Adventure[]>([]);const [adventure,setAdventure]=useState<Adventure|null>(null);const [taskId,setTaskId]=useState<string|null>(null);const [selectedImport,setSelectedImport]=useState<string|null>(null);const [modal,setModal]=useState<'import'|'settings'|'journal'|null>(null);const [error,setError]=useState('');const [busy,setBusy]=useState(false);
+ const [path,setPath]=useState('');const [git,setGit]=useState('');const [files,setFiles]=useState<File[]>([]);const [encoding,setEncoding]=useState('utf-8-sig');const [focus,setFocus]=useState('');const [settings,setSettings]=useState<Settings|null>(null);const [key,setKey]=useState('');const [testMessage,setTestMessage]=useState('');const [journal,setJournal]=useState<Journal|null>(null);
+ const [source,setSource]=useState<Source|null>(null);const [workspaceSource,setWorkspaceSource]=useState(false);const [sourceLocation,setSourceLocation]=useState('');const [draft,setDraft]=useState('');const [fileDraft,setFileDraft]=useState('');const [hint,setHint]=useState('');const [evaluation,setEvaluation]=useState<Evaluation|null>(null);const [run,setRun]=useState<Run|null>(null);const [entry,setEntry]=useState('');
+ const navigation=useRef(new NavigationEpoch()).current;const heroGate=useRef(new RequestGate()).current;const adventureGate=useRef(new RequestGate()).current;const sourceGate=useRef(new RequestGate()).current;const pendingReplacement=useRef<{adventureId:string;objectiveId:string;oldTaskId:string}|null>(null);const taskOwner=useRef<string|null>(null);const taskEpoch=useRef(0);
+ const task=adventure?.tasks.find(t=>t.id===taskId)||null;const selected=imports.find(i=>i.id===selectedImport)||null;
+ const fail=(e:unknown)=>setError(e instanceof Error?e.message:String(e));
+ const loadBase=useCallback(async()=>{try{const [r,h,i]=await Promise.all([api<RoleInfo[]>('/roles'),api<Hero[]>('/characters'),api<ImportRecord[]>('/imports')]);setRoles(r);setHeroes(h);setImports(i)}catch(e){fail(e)}},[]);
+ const loadAdventures=useCallback(async(id:string)=>{const token=heroGate.issue(id);if(!token)return;try{const result=await api<Adventure[]>(`/characters/${id}/adventures`);if(heroGate.accept(token))setAdventures(result)}catch(e){if(heroGate.accept(token))fail(e)}},[heroGate]);
+ const loadAdventure=useCallback(async(id:string)=>{const token=adventureGate.issue(id);if(!token)return;try{const result=await api<Adventure>(`/adventures/${id}`);if(adventureGate.accept(token)){setAdventure(result);const pending=pendingReplacement.current;if(pending?.adventureId===id){const replacement=result.tasks.find(t=>t.objective_id===pending.objectiveId&&t.id!==pending.oldTaskId);if(replacement){pendingReplacement.current=null;sourceGate.change(null);setSource(null);taskEpoch.current++;taskOwner.current=JSON.stringify([id,replacement.id]);setTaskId(replacement.id)}}return result}}catch(e){if(adventureGate.accept(token))fail(e)}},[adventureGate,sourceGate]);
+ useEffect(()=>{void loadBase()},[loadBase]);
+ useEffect(()=>{if(hero)void loadAdventures(hero.id)},[hero,loadAdventures]);
+ useEffect(()=>{const pending=imports.some(i=>i.status==='analyzing')||adventure?.status==='planning'||adventure?.tasks.some(t=>t.status==='generating');if(!pending)return;const timer=setInterval(()=>{void loadBase();if(adventure)void loadAdventure(adventure.id)},2000);return()=>clearInterval(timer)},[imports,adventure,loadBase,loadAdventure]);
+ useEffect(()=>{if(!task||!adventure){setSource(null);return}const storage=draftKey(adventure.id,task.id);setDraft(localStorage.getItem(storage)??task.last_answer??'');setHint('');setSource(null)},[taskId,adventure?.id]);
+ useEffect(()=>{setEvaluation(task?.last_evaluation??null)},[task?.id,task?.last_evaluation]);
+ useEffect(()=>{setRun(task?.last_run??null)},[task?.id,task?.last_run]);
+ useEffect(()=>{setEntry(task?.run_entry??'')},[task?.id,task?.run_entry]);
+ const action=async(fn:()=>Promise<void>)=>{setError('');setBusy(true);try{await fn()}catch(e){fail(e)}finally{setBusy(false)}};
+ const selectHero=(h:Hero)=>{navigation.advance();pendingReplacement.current=null;taskEpoch.current++;taskOwner.current=null;heroGate.change(h.id);adventureGate.change(null);sourceGate.change(null);setAdventures([]);setHero(h);setAdventure(null);setTaskId(null)};
+ const selectTask=(id:string|null)=>{navigation.advance();pendingReplacement.current=null;taskEpoch.current++;taskOwner.current=id&&adventure?JSON.stringify([adventure.id,id]):null;sourceGate.change(null);setSource(null);setTaskId(id)};
+ const backToCamp=()=>{navigation.advance();pendingReplacement.current=null;taskEpoch.current++;taskOwner.current=null;adventureGate.change(null);sourceGate.change(null);setAdventure(null);setTaskId(null);void loadBase();if(hero)void loadAdventures(hero.id)};
+ const openAdventure=async(a:Adventure)=>{navigation.advance();pendingReplacement.current=null;taskEpoch.current++;taskOwner.current=null;adventureGate.change(a.id);sourceGate.change(null);setAdventure(null);setTaskId(null);await loadAdventure(a.id);if(a.status==='unprepared'&&adventureGate.current(a.id))await action(async()=>{await api(`/adventures/${a.id}/prepare`,'POST',{});await loadAdventure(a.id)})};
+ const createImport=()=>action(async()=>{const input=files.length?{files:await Promise.all(files.map(encodeFile))}:git.trim()?{git_url:git.trim()}:{path:path.trim()};const result=await api<ImportRecord>('/imports','POST',{...input,encoding});setSelectedImport(result.id);setFocus('');setFiles([]);setPath('');setGit('');await loadBase()});
+ const startAdventure=(role:Role)=>action(async()=>{if(!selected||!analysisReady(selected))return;const creation=navigation.capture();let h=heroes.find(x=>x.role===role);if(!h){h=await api<Hero>('/characters','POST',{role});if(!navigation.matches(creation))return}const a=await api<Adventure>(`/characters/${h.id}/adventures`,'POST',{import_id:selected.id});if(!navigation.matches(creation))return;selectHero(h);const selection=navigation.capture();setModal(null);await loadBase();if(!navigation.matches(selection)||!heroGate.current(h.id))return;await loadAdventures(h.id);if(!navigation.matches(selection)||!heroGate.current(h.id))return;await openAdventure(a)});
+ const openSource=(p:string,workspace=false,location='')=>action(async()=>{if(!adventure)return;const url=workspace&&task?`/adventures/${adventure.id}/tasks/${task.id}/file?path=${encodeURIComponent(p)}`:`/imports/${adventure.import_id}/file?path=${encodeURIComponent(p)}`;const context=JSON.stringify([adventure.id,task?.id,p,workspace]);sourceGate.change(context);const token=sourceGate.issue(context);const s=await api<Source>(url);if(!sourceGate.accept(token))return;setSource(s);setWorkspaceSource(workspace);setSourceLocation(location);setFileDraft(workspace?localStorage.getItem(`practice-file:${encodeURIComponent(adventure.id)}:${encodeURIComponent(task!.id)}:${encodeURIComponent(p)}`)??s.content:s.content)});
+ const saveDraft=(v:string)=>{setDraft(v);if(adventure&&task)localStorage.setItem(draftKey(adventure.id,task.id),v)};
+ const submit=()=>action(async()=>{if(!adventure||!task)return;const epoch=taskEpoch.current;const result=await api<Evaluation>(`/adventures/${adventure.id}/tasks/${task.id}/answer`,'POST',{answer:draft});if(epoch===taskEpoch.current&&taskOwner.current===JSON.stringify([adventure.id,task.id]))setEvaluation(result);await loadAdventure(adventure.id)});
+ const configure=()=>action(async()=>{const s=await api<Settings>('/settings');setSettings(s);setKey('');setTestMessage('');setModal('settings')});
+ const openJournal=()=>action(async()=>{if(!adventure)return;setJournal(await api<Journal>(`/adventures/${adventure.id}/journal`));setModal('journal')});
+ if(intro)return <IntroCinematic onComplete={()=>{localStorage.setItem('adventure-intro-seen','1');setIntro(false)}}/>;
+ return <div className={`game role-${hero?.role||'camp'}`}><RealmBackdrop scene={adventure?'adventure':'camp'} role={hero?.role}/><div className="game-content"><header className="hud"><button className="brand" onClick={backToCamp}>{storyBrand.title}</button><div className="hud-actions"><button onClick={()=>{navigation.advance();setModal('import')}}>导入材料</button><button onClick={configure}>模型设置</button><button onClick={()=>setIntro(true)}>重播开场</button></div></header>
+ {error&&<div className="error" role="alert"><span>{error}</span><button onClick={()=>setError('')}>关闭</button></div>}
+ {!adventure?<main className="camp"><div className="camp-heading"><p className="eyebrow">角色营地</p><h1>{hero?hero.name:storyBrand.camp}</h1><p>{hero?roleStories[hero.role].introduction:'导入材料，分析适合的职业，再选择角色开始探索。'}</p><button className="primary" onClick={()=>{navigation.advance();setModal('import')}}>导入材料</button></div><section className="camp-roster" aria-label="角色"><div className="section-title"><h2>你的角色</h2><span>角色的材料与进度相互独立</span></div>{heroes.length===0?<p className="empty">还没有角色。分析材料后可以创建。</p>:<div className="hero-list">{heroes.map(h=><button key={h.id} className={`hero-option ${hero?.id===h.id?'selected':''}`} onClick={()=>selectHero(h)}><Character role={h.role} size={74}/><span><strong>{h.name}</strong><small>{roleNames[h.role]} · {h.completed_objectives} 个目标完成</small>{h.stage_title&&<small>{h.stage_title} · {h.completed_adventures??0} 段冒险完成</small>}</span></button>)}</div>}</section>{hero&&<section className="adventure-list"><div className="section-title"><h2>冒险记录</h2><button onClick={()=>{navigation.advance();setModal('import')}}>添加材料</button></div>{adventures.length===0?<p className="empty">这个角色还没有冒险。导入适合的材料开始探索。</p>:adventures.map(a=><div className="adventure-row" key={a.id}><button className="adventure-link" onClick={()=>void openAdventure(a)}><strong>{a.title}</strong><span>{a.completed_objectives}/{a.total_objectives} 个目标 · {a.status==='completed'?'已完成':a.status==='failed'?'准备失败':'继续探索'}</span></button><button onClick={()=>{if(window.confirm(`删除冒险“${a.title}”及其进度？`))void action(async()=>{await api(`/adventures/${a.id}`,'DELETE');await loadAdventures(hero.id)})}}>删除</button></div>)}<button className="text-danger" onClick={()=>{if(window.confirm(`删除角色“${hero.name}”及其所有冒险？`))void action(async()=>{await api(`/characters/${hero.id}`,'DELETE');if(heroGate.current(hero.id)){heroGate.change(null);adventureGate.change(null);sourceGate.change(null);taskEpoch.current++;taskOwner.current=null;setHero(null);setAdventures([])}await loadBase()})}}>删除角色</button></section>}</main>:<main className="adventure"><div className="adventure-heading"><button className="back" onClick={backToCamp}>← 返回营地</button><div><p className="eyebrow">{roleNames[adventure.role]}的冒险</p><h1>{adventure.title}</h1><p>{adventure.summary}</p></div><div className="progress"><strong>{adventure.completed_objectives} / {adventure.total_objectives}</strong><span>知识目标</span><button onClick={openJournal}>回忆日志</button></div></div>
+ {(adventure.status==='planning'||adventure.status==='unprepared')&&<p className="notice">正在准备主题和最初的探索任务，完成的任务会逐个出现。</p>}{adventure.source_analysis_progress&&['planning','failed','unprepared'].includes(adventure.status)&&<AnalysisProgressView progress={adventure.source_analysis_progress} complete={adventure.source_analysis_complete===true}/>}{adventure.status==='failed'&&<div className="notice"><p>准备失败：{adventure.error}</p><button onClick={()=>void action(async()=>{await api(`/adventures/${adventure.id}/prepare`,'POST',{});await loadAdventure(adventure.id)})}>重试准备</button></div>}
+ {adventure.story_events?.length?<section className="story-events" aria-label="营地纪事"><h2>营地纪事</h2>{adventure.story_events.map(event=><article key={event.id}><h3>{event.title}</h3><p>{event.body}</p></article>)}</section>:null}<div className="landmarks">{adventure.topics.map(topic=><section className="landmark" key={topic.id}><div className="landmark-mark" aria-hidden="true">✦</div><div><h2>{topic.title}</h2><p>{topic.description}</p><div className="encounters">{adventure.objectives.filter(o=>o.topic_id===topic.id).map(o=>{const t=adventure.tasks.find(x=>x.objective_id===o.id);return <div className="encounter" key={o.id}><div><strong>{o.title}</strong><p>{o.description}</p><small>{taskStatus[o.status]}{t?.id===adventure.recommended_task_id?' · 推荐探索':''}</small>{o.status==='locked'&&<div className="prerequisites">需要先完成：{o.prerequisite_ids.map(id=>adventure.objectives.find(x=>x.id===id)).filter((x):x is NonNullable<typeof x>=>!!x&&x.status!=='completed').map(prerequisite=>{const prerequisiteTask=adventure.tasks.find(x=>x.objective_id===prerequisite.id);return <span key={prerequisite.id}>{prerequisite.title}{prerequisiteTask&&prerequisite.status==='available'&&<button onClick={()=>selectTask(prerequisiteTask.id)}>前往</button>}</span>})}</div>}</div>{t&&o.status!=='locked'&&<button onClick={()=>selectTask(t.id)}>{t.status==='ready'?'进入':t.status==='generating'?'查看进度':'准备任务'}</button>}</div>})}</div></div></section>)}</div>{adventure.ending&&!adventure.story_events?.some(event=>event.id==='ending')&&<section className="ending"><h2>冒险结语</h2><p>{adventure.ending}</p></section>}</main>}
+ </div>
+ {modal==='import'&&<Modal title="导入与分析材料" onClose={()=>{navigation.advance();setModal(null)}}><div className="import-layout"><div><h3>添加材料</h3><p className="muted import-limits">每次最多 512 个文件、合计 20 MB；单个文本 2 MB，单个 PDF 8 MB、500 页。扫描图像需要先转换为文字。</p><label>文字编码<select value={encoding} onChange={e=>setEncoding(e.target.value)}><option value="utf-8-sig">UTF-8（兼容 BOM，默认）</option><option value="utf-8">UTF-8</option><option value="utf-16">UTF-16</option><option value="gb18030">GB18030（中文旧编码）</option></select></label><MaterialPicker files={files} disabled={busy} onChange={selected=>{setFiles(selected);setPath('');setGit('')}}/><label>本机绝对路径<input value={path} onChange={e=>{setPath(e.target.value);setFiles([]);setGit('')}} placeholder="输入文件或目录的绝对路径"/></label><label>Git 地址<input value={git} onChange={e=>{setGit(e.target.value);setFiles([]);setPath('')}} placeholder="输入 Git 仓库地址"/></label><button className="primary" disabled={busy||(!files.length&&!path.trim()&&!git.trim())} onClick={createImport}>导入材料{files.length?`（${files.length} 个文件）`:''}</button><h3>已导入的材料</h3><div className="staged">{imports.map(i=><button key={i.id} className={selectedImport===i.id?'selected':''} onClick={()=>{navigation.advance();setSelectedImport(i.id);setFocus(i.analysis_focus??'')}}>{i.title}<small>{analysisStatus(i)}</small></button>)}</div></div><div>{selected?<ImportDetail key={selected.id} record={selected} currentRole={hero?.role} focus={focus} setFocus={setFocus} busy={busy} onAction={action} refresh={loadBase} onStart={startAdventure}/>:<p className="empty">选择已导入的材料，查看范围并进行分析。</p>}</div></div></Modal>}
+ {modal==='settings'&&settings&&<Modal title="模型设置" onClose={()=>setModal(null)}><div className="settings-form"><p>配置你自己的 OpenAI 兼容接口。密钥已设置时留空可保留原值。</p><label>接口地址<input value={settings.base_url} onChange={e=>setSettings({...settings,base_url:e.target.value})}/></label><label>模型名称<input value={settings.model} onChange={e=>setSettings({...settings,model:e.target.value})}/></label><label>API 密钥<input type="password" value={key} onChange={e=>setKey(e.target.value)} placeholder={settings.key_set?'已设置，留空保留':'输入密钥'}/></label><label>生成超时（秒）<input type="number" min="1" value={settings.generation_timeout} onChange={e=>setSettings({...settings,generation_timeout:Number(e.target.value)})}/></label>{settings.storage_error&&<p className="error">{settings.storage_error}</p>}<div className="button-row"><button className="primary" disabled={busy} onClick={()=>void action(async()=>{const s=await api<Settings>('/settings','PUT',{base_url:settings.base_url,model:settings.model,generation_timeout:settings.generation_timeout,...(key?{api_key:key}:{})});setSettings(s);setKey('');setTestMessage('设置已保存')})}>保存设置</button><button disabled={busy} onClick={()=>void action(async()=>{const result=await api<{ok:boolean;message:string}>('/settings/test','POST',{});setTestMessage(result.message)})}>测试已保存的设置</button></div>{testMessage&&<p role="status">{testMessage}</p>}</div></Modal>}
+ {modal==='journal'&&<Modal title="回忆日志" onClose={()=>setModal(null)}>{journal?.entries.length?journal.entries.map((e,i)=><article className="journal-entry" key={`${e.task_id}:${e.updated_at}:${i}`}><h3>{e.title}</h3>{e.answer&&<p>你的回答：{e.answer}</p>}{e.feedback&&<p>AI 评审：{e.feedback}</p>}{e.reflection&&<div><p>我的自评：{confidenceNames[e.reflection.confidence]}</p>{e.reflection.note&&<p className="reflection-note">我的笔记：{e.reflection.note}</p>}</div>}<small>{journalEntryLabel(e)} · 提示 {e.hints_used} 次</small></article>):<p className="empty">完成或提交探索后，这里会记录你的回答和反馈。</p>}</Modal>}
+ {task&&adventure&&<Modal title={task.title} onClose={()=>selectTask(null)}><div className="task-layout"><div className="task-main">{task.status!=='ready'?<div className="notice"><p>{task.status==='generating'?'任务正在准备中。':task.status==='failed'?`准备失败：${task.error||'未知错误'}`:'这个任务尚未准备。'}</p>{task.status!=='generating'&&<button disabled={busy} onClick={()=>void action(async()=>{await api(`/adventures/${adventure.id}/tasks/${task.id}/prepare`,'POST',{});await loadAdventure(adventure.id)})}>{task.status==='failed'?'重试':'准备任务'}</button>}</div>:<><p className="eyebrow">知识探索 · {taskStatus[task.learning_status]}</p><p className="muted">以下任务说明、讲解与问题由 AI 生成</p><p className="task-brief">{task.brief}</p><p>{task.objective}</p><LearningPath key={`learning:${adventure.id}:${task.id}`} teaching={task.teaching??[]}/>{task.criteria?.length?<section><h3>通过标准</h3><ul>{task.criteria.map((criterion,i)=><li key={i}>{criterion}</li>)}</ul></section>:null}<section className="question"><h3>尝试回答</h3><p>{task.question}</p>{task.options?.map(o=><label className="option" key={o.id}><input type={task.interaction==='choice'?'radio':'checkbox'} name="answer-option" checked={task.interaction==='choice'?draft===o.id:draft.split('\n').includes(o.id)} onChange={e=>{if(task.interaction==='choice')saveDraft(o.id);else {const ids=draft.split('\n').filter(Boolean).filter(x=>x!==o.id);if(e.target.checked)ids.push(o.id);saveDraft(ids.join('\n'))}}}/>{o.text}</label>)}{task.interaction==='order'&&<p className="muted">按顺序选择选项，或在下方填写顺序。</p>}<label>你的回答<textarea rows={task.interaction==='code'?12:5} value={draft} onChange={e=>saveDraft(e.target.value)} placeholder="写下你的理解；草稿会保留在这个任务中。"/></label><div className="button-row"><button className="primary" disabled={busy||!draft.trim()} onClick={submit}>提交回答</button><button disabled={busy} onClick={()=>void action(async()=>{const epoch=taskEpoch.current;const h=await api<{hint:string;hints_used:number}>(`/adventures/${adventure.id}/tasks/${task.id}/hint`,'POST',{});if(epoch===taskEpoch.current&&taskOwner.current===JSON.stringify([adventure.id,task.id]))setHint(h.hint);await loadAdventure(adventure.id)})}>获取提示</button></div>{task.used_hints?.length?<div className="hint"><h3>已用提示</h3>{task.used_hints.map((h,i)=><p key={i}>{h}</p>)}</div>:hint&&<p className="hint">提示：{hint}</p>}{evaluation&&<div className="feedback"><h3>AI 评审 · {evaluation.status==='passed'?'已通过':evaluation.status==='pending'?'等待评审':'继续完善'}</h3><p>{evaluation.feedback}</p>{evaluation.checks?.map((c,i)=><p key={i}>{c.passed?'✓':'○'} {c.criterion}：{c.evidence}</p>)}</div>}</section><ReflectionEditor key={`reflection:${adventure.id}:${task.id}`} adventureId={adventure.id} taskId={task.id} saved={task.reflection} onSaved={async()=>{await loadAdventure(adventure.id)}}/></>}</div><aside className="task-side">{task.status==='ready'&&<button disabled={busy} onClick={()=>{if(window.confirm('生成同一知识目标的替代任务？原任务及其回答和练习副本会保留。'))void action(async()=>{pendingReplacement.current={adventureId:adventure.id,objectiveId:task.objective_id,oldTaskId:task.id};try{await api(`/adventures/${adventure.id}/tasks/${task.id}/prepare`,'POST',{replace:true});await loadAdventure(adventure.id)}catch(e){pendingReplacement.current=null;throw e}})}}>生成替代任务</button>}<h3>原始材料线索</h3>{task.source_refs?.length?task.source_refs.map((ref,i)=><button className="source-link" key={i} onClick={()=>void openSource(ref.path,false,ref.page?`第 ${ref.page} 页`:`第 ${ref.line} 行`)}>{ref.path}<small>{ref.page?`第 ${ref.page} 页`:`第 ${ref.line} 行`}</small></button>):<p className="muted">暂无引用。</p>}{task.interaction==='code'&&<><h3>练习副本</h3><p className="muted">在独立副本中编辑和运行；原始材料不会被修改。</p>{task.source_refs?.map((ref,i)=><button className="source-link" key={i} onClick={()=>void openSource(ref.path,true)}>编辑 {ref.path}</button>)}<label>运行入口<input value={entry} onChange={e=>setEntry(e.target.value)} placeholder="使用默认入口"/></label><div className="button-row"><button disabled={busy} onClick={()=>void action(async()=>{const epoch=taskEpoch.current;const result=await api<Run>(`/adventures/${adventure.id}/tasks/${task.id}/run`,'POST',{...(entry?{entry}:{})});if(epoch===taskEpoch.current&&taskOwner.current===JSON.stringify([adventure.id,task.id]))setRun(result);await loadAdventure(adventure.id)})}>运行</button><button onClick={()=>void action(async()=>{await api(`/adventures/${adventure.id}/tasks/${task.id}/stop`,'POST',{});await loadAdventure(adventure.id)})}>停止</button></div>{run&&<div className="run-result"><strong>本地执行 · {run.status}</strong><p>退出码：{run.exit_code??'无'} · {run.duration_ms} ms</p><pre>{run.stdout}{run.stderr?`\n${run.stderr}`:''}</pre></div>}</>}{source&&<div className="source-reader"><h3>{source.path}</h3>{sourceLocation&&<p className="muted">引用位置：{sourceLocation}</p>}{workspaceSource?<><textarea rows={16} value={fileDraft} onChange={e=>{setFileDraft(e.target.value);localStorage.setItem(`practice-file:${encodeURIComponent(adventure.id)}:${encodeURIComponent(task.id)}:${encodeURIComponent(source.path)}`,e.target.value)}}/><button disabled={busy} onClick={()=>void action(async()=>{const saved=fileDraft;const storageKey=`practice-file:${encodeURIComponent(adventure.id)}:${encodeURIComponent(task.id)}:${encodeURIComponent(source.path)}`;await api(`/adventures/${adventure.id}/tasks/${task.id}/file`,'PUT',{path:source.path,content:saved});clearSavedDraft(localStorage,storageKey,saved)})}>保存到练习副本</button></>:<pre>{source.content}</pre>}</div>}</aside></div></Modal>}
+ </div>
+}
+function ImportDetail({record,currentRole,focus,setFocus,busy,onAction,refresh,onStart}:{record:ImportRecord;currentRole?:Role;focus:string;setFocus:(v:string)=>void;busy:boolean;onAction:(f:()=>Promise<void>)=>Promise<void>;refresh:()=>Promise<void>;onStart:(r:Role)=>void}){
+ const [paths,setPaths]=useState<string[]>(record.scope?.paths??record.files.map(file=>file.path));
+ const [from,setFrom]=useState(record.scope?.page_start?.toString()??'');
+ const [to,setTo]=useState(record.scope?.page_end?.toString()??'');
+ return <div className="import-detail">
+  <h3>{record.title}</h3>
+  <button disabled={busy||record.status==='analyzing'} onClick={()=>{if(window.confirm(`删除材料“${record.title}”？已被冒险使用的材料无法删除。`))void onAction(async()=>{await api(`/imports/${record.id}`,'DELETE');await refresh()})}}>删除材料</button>
+  <p>{record.files.length} 个文件 · {analysisStatus(record)}</p>
+  {record.diagnostics?.map((diagnostic,index)=><p className="notice" key={index}>{diagnostic}</p>)}
+  {record.error&&<p className="error">{record.error}</p>}
+  <fieldset disabled={busy||record.status==='analyzing'}>
+   <legend>分析范围</legend>
+   <div className="file-list">{record.files.map(file=><label key={file.path}><input type="checkbox" checked={paths.includes(file.path)} onChange={event=>setPaths(event.target.checked?[...paths,file.path]:paths.filter(path=>path!==file.path))}/>{file.path}{file.pages?`（${file.pages} 页）`:''}</label>)}</div>
+   <div className="page-range"><label>PDF 起始页（可选）<input type="number" min="1" value={from} onChange={event=>setFrom(event.target.value)}/></label><label>结束页（可选）<input type="number" min="1" value={to} onChange={event=>setTo(event.target.value)}/></label></div>
+   <button disabled={busy||!paths.length} onClick={()=>void onAction(async()=>{await api(`/imports/${record.id}/scope`,'PUT',{paths,...(from?{page_start:Number(from)}:{}),...(to?{page_end:Number(to)}:{})});await refresh()})}>保存范围</button>
+  </fieldset>
+  <MaterialAnalysis record={record} currentRole={currentRole} focus={focus} setFocus={setFocus} busy={busy} onAnalyze={()=>void onAction(async()=>{await api(`/imports/${record.id}/analyze`,'POST',{focus});await refresh()})} onStart={onStart}/>
+ </div>;
 }
