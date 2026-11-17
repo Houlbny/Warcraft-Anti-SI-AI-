@@ -75,4 +75,4 @@ npm run build
 
 macOS 后端命令为 `.venv/bin/python -m pytest tests -q`。自动检查、真实模型质量和各平台运行需要分别验证。
 
-[使用与排查](docs/USAGE.md) · [学习流程](docs/LEARNING.md) · [接口约定](docs/API-CONTRACT.md) · [提示词编辑](prompts/README.md)
+[使用与排查](docs/USAGE.md) · [学习流程](docs/LEARNING.md) · [接口约定](docs/API-CONTRACT.md) · [提示词编辑](prompts/README.md) · [项目现状与推进建议](docs/PROJECT-REVIEW-2026-11-17.md)
